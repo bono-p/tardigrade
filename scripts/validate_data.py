@@ -14,6 +14,12 @@ Usage:
     python scripts/validate_data.py --input data/raw/corpus.csv \
         --output-report reports/validation_report.txt \
         --output-clean data/processed/corpus_clean.csv
+
+Options avancées (✅ nouvelles):
+    --ratio-max FLOAT   Seuil haut du ratio longueur FF/FR (défaut: 3.0)
+                        Au-dessus → paire suspecte (possible mésalignement)
+    --ratio-min FLOAT   Seuil bas  du ratio longueur FF/FR (défaut: 0.33)
+                        En-dessous → paire suspecte
 """
 
 import argparse
@@ -32,7 +38,11 @@ REQUIRED_COLUMNS = ["french_text", "fulfulde_text"]
 # transcrire le fulfulde (incluant les lettres spécifiques courantes :
 # ɓ ɗ ƴ ŋ ʼ et leurs variantes capitales). Tout caractère hors de cet
 # ensemble (et hors ponctuation/chiffres usuels) est signalé, pas supprimé.
-EXPECTED_EXTRA_CHARS = set("ɓɗƴŋʼʔɲÉéèêëàâäîïôöùûüçÀÂÄÎÏÔÖÙÛÜÇ’‘”“…«»")
+EXPECTED_EXTRA_CHARS = set("ɓɗƴŋʼʔɲÉéèêëàâäîïôöùûüçÀÂÄÎÏÔÖÙÛÜÇ''\"\"…«»")
+
+# Seuils de ratio par défaut (✅ maintenant configurables via --ratio-max / --ratio-min)
+DEFAULT_RATIO_MAX = 3.0
+DEFAULT_RATIO_MIN = 0.33
 
 
 def load_csv(path: Path) -> pd.DataFrame:
@@ -71,9 +81,19 @@ def check_unexpected_chars(text: str) -> set:
     return unexpected
 
 
-def run_validation(df: pd.DataFrame) -> dict:
+def run_validation(df: pd.DataFrame,
+                   ratio_max: float = DEFAULT_RATIO_MAX,
+                   ratio_min: float = DEFAULT_RATIO_MIN) -> dict:
+    """
+    Args:
+        df        : DataFrame corpus
+        ratio_max : seuil haut ratio longueur FF/FR — configurable via CLI (✅)
+        ratio_min : seuil bas  ratio longueur FF/FR — configurable via CLI (✅)
+    """
     report = {
         "n_total": len(df),
+        "ratio_max": ratio_max,
+        "ratio_min": ratio_min,
         "empty_french": [],
         "empty_fulfulde": [],
         "duplicates_exact": [],
@@ -90,7 +110,7 @@ def run_validation(df: pd.DataFrame) -> dict:
     seen_fr = {}
 
     for idx, row in df.iterrows():
-        fr = "" if pd.isna(row["french_text"]) else str(row["french_text"])
+        fr = "" if pd.isna(row["french_text"])   else str(row["french_text"])
         ff = "" if pd.isna(row["fulfulde_text"]) else str(row["fulfulde_text"])
 
         fr_blank = is_blank(row["french_text"])
@@ -126,9 +146,11 @@ def run_validation(df: pd.DataFrame) -> dict:
             len_fr, len_ff = len(fr.split()), len(ff.split())
             if len_fr > 0 and len_ff > 0:
                 ratio = len_ff / len_fr
-                # Une phrase 3x plus longue/courte que son alignement est suspecte
-                if ratio > 3.0 or ratio < 0.33:
-                    report["length_ratio_outliers"].append((idx, len_fr, len_ff, round(ratio, 2)))
+                # ✅ Seuils configurables (défaut: 3.0 / 0.33)
+                if ratio > ratio_max or ratio < ratio_min:
+                    report["length_ratio_outliers"].append(
+                        (idx, len_fr, len_ff, round(ratio, 2))
+                    )
 
         for src_text in (fr, ff):
             unexpected = check_unexpected_chars(src_text)
@@ -146,6 +168,7 @@ def write_report(report: dict, out_path: Path):
     lines.append("=" * 70)
     lines.append(f"Lignes totales analysées : {report['n_total']}")
     lines.append(f"Lignes 100% vides (supprimées automatiquement) : {len(report['rows_to_drop'])}")
+    lines.append(f"Seuil ratio longueur utilisé : [{report['ratio_min']} ; {report['ratio_max']}]")
     lines.append("")
 
     def section(title, items, formatter=lambda x: str(x), max_show=20):
@@ -167,9 +190,11 @@ def write_report(report: dict, out_path: Path):
              report["duplicates_exact"], lambda p: f"lignes {p[0]} et {p[1]}")
     section("Même phrase française alignée à 2 fulfulde différents",
              report["duplicates_fr_only"], lambda p: f"lignes {p[0]} et {p[1]} (vérifier cohérence)")
-    section("Ratio de longueur fr/ff suspect (possible mésalignement)",
-             report["length_ratio_outliers"],
-             lambda t: f"ligne {t[0]}: {t[1]} mots FR vs {t[2]} mots FF (ratio={t[3]})")
+    section(
+        f"Ratio de longueur fr/ff suspect (> {report['ratio_max']} ou < {report['ratio_min']})",
+        report["length_ratio_outliers"],
+        lambda t: f"ligne {t[0]}: {t[1]} mots FR vs {t[2]} mots FF (ratio={t[3]})"
+    )
     section("Espaces en début/fin de champ",
              report["leading_trailing_space"], lambda i: f"ligne {i}")
     section("Balises HTML ou entités résiduelles",
@@ -199,15 +224,29 @@ def write_report(report: dict, out_path: Path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", required=True, type=Path)
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--input",         required=True, type=Path)
     parser.add_argument("--output-report", required=True, type=Path)
-    parser.add_argument("--output-clean", required=True, type=Path,
-                         help="CSV de sortie (lignes 100% vides retirées uniquement)")
+    parser.add_argument("--output-clean",  required=True, type=Path,
+                        help="CSV de sortie (lignes 100% vides retirées uniquement)")
+    # ✅ Nouveaux arguments : seuils de ratio configurables
+    parser.add_argument("--ratio-max", type=float, default=DEFAULT_RATIO_MAX,
+                        help=f"Seuil haut ratio longueur FF/FR (défaut: {DEFAULT_RATIO_MAX}). "
+                             "Au-dessus → paire signalée comme suspecte.")
+    parser.add_argument("--ratio-min", type=float, default=DEFAULT_RATIO_MIN,
+                        help=f"Seuil bas ratio longueur FF/FR (défaut: {DEFAULT_RATIO_MIN}). "
+                             "En-dessous → paire signalée comme suspecte.")
     args = parser.parse_args()
 
+    if args.ratio_min <= 0 or args.ratio_max <= 0 or args.ratio_min >= args.ratio_max:
+        raise SystemExit(
+            f"[ERREUR] Les seuils de ratio doivent vérifier 0 < ratio_min < ratio_max. "
+            f"Valeurs reçues : min={args.ratio_min}, max={args.ratio_max}"
+        )
+
     df = load_csv(args.input)
-    report = run_validation(df)
+    report = run_validation(df, ratio_max=args.ratio_max, ratio_min=args.ratio_min)
     write_report(report, args.output_report)
 
     df_clean = df.drop(index=report["rows_to_drop"]).reset_index(drop=True)
