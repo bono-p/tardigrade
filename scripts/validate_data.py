@@ -237,6 +237,14 @@ def main():
     parser.add_argument("--ratio-min", type=float, default=DEFAULT_RATIO_MIN,
                         help=f"Seuil bas ratio longueur FF/FR (défaut: {DEFAULT_RATIO_MIN}). "
                              "En-dessous → paire signalée comme suspecte.")
+    # ✅ Normalisation Unicode NFC (activée par défaut)
+    # Résout les incohérences d'encodage des caractères fulfulde (ɓ, ɗ, ƴ, ŋ…) selon la source
+    # du corpus : le même caractère peut être stocké en forme NFD (base + combining mark) ou NFC
+    # (caractère précomposé), ce qui produit des tokens distincts dans le tokenizer NLLB et
+    # dégrade la qualité, surtout côté Fulfulde → Français.
+    parser.add_argument("--no-normalize", dest="normalize", action="store_false", default=True,
+                        help="Désactive la normalisation Unicode NFC sur les deux colonnes. "
+                             "Par défaut elle est activée.")
     args = parser.parse_args()
 
     if args.ratio_min <= 0 or args.ratio_max <= 0 or args.ratio_min >= args.ratio_max:
@@ -246,6 +254,17 @@ def main():
         )
 
     df = load_csv(args.input)
+
+    # ── Normalisation NFC (avant validation pour que le rapport soit cohérent) ──
+    if args.normalize:
+        def _nfc(x):
+            return unicodedata.normalize("NFC", str(x)) if pd.notna(x) else x
+        df["french_text"]   = df["french_text"].apply(_nfc)
+        df["fulfulde_text"] = df["fulfulde_text"].apply(_nfc)
+        print("✅ Normalisation Unicode NFC appliquée sur french_text et fulfulde_text.")
+    else:
+        print("⚠️  Normalisation Unicode NFC désactivée (--no-normalize).")
+
     report = run_validation(df, ratio_max=args.ratio_max, ratio_min=args.ratio_min)
     write_report(report, args.output_report)
 
